@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from threading import RLock
+
+
+@dataclass
+class STTApiConfig:
+    websocket_url: str = ""
+    auth_header: str = "Authorization"
+    auth_token: str = ""
+    # Provider selection: generic-ws | baidu | aliyun | azure | iflytek
+    provider: str = "generic-ws"
+    # Common model field (optional)
+    model: str = ""
+    # Sample rate for streaming (8000, 16000, 44100)
+    sample_rate: int = 16000
+    # Language directions (provider-dependent; used by baidu)
+    from_lang: str = "zh"
+    to_lang: str = "en"
+    # Baidu-specific options
+    baidu_return_target_tts: bool = False
+    baidu_tts_speaker: str = "man"
+    baidu_user_sn: str = ""
+    # Baidu credentials
+    baidu_app_id: str = ""
+    baidu_api_key: str = ""
+    baidu_secret_key: str = ""
+    # Aliyun credentials
+    aliyun_access_key_id: str = ""
+    aliyun_access_key_secret: str = ""
+    aliyun_app_key: str = ""
+    aliyun_endpoint: str = ""
+    # Azure credentials
+    azure_speech_key: str = ""
+    azure_region: str = ""
+    azure_endpoint: str = ""
+    # iFlytek credentials
+    iflytek_app_id: str = ""
+    iflytek_api_key: str = ""
+    iflytek_api_secret: str = ""
+
+
+
+
+@dataclass
+class LocalSTTConfig:
+    whisper_model: str = "base"
+
+
+@dataclass
+class OverlayConfig:
+    font_size: int = 28
+    color_hex: str = "#FFFFFF"
+    bg_opacity: float = 0.0
+    # Percent-based geometry relative to primary screen
+    x_pct: float = 0.1
+    y_pct: float = 0.76
+    width_pct: float = 0.8
+    height_pct: float = 0.18
+
+
+@dataclass
+class AppConfig:
+    # stt_mode: 'api' (websocket true streaming) or 'local'
+    stt_mode: str = "api"
+    stt_api: STTApiConfig = field(default_factory=STTApiConfig)
+    local_stt: LocalSTTConfig = field(default_factory=LocalSTTConfig)
+    # Game targeting
+    target_game_process: str = ""  # e.g. game.exe
+    enforce_routing: bool = False   # hint UI to remind routing
+    # Translation/TTS providers
+    use_openai_translation: bool = True
+    use_openai_tts: bool = True
+    # Subtitles only mode: do not require mic or TTS devices
+    subtitles_only: bool = False
+    # UI preferences / persisted selections
+    target_language: str = "zh-CN"
+    mic_device_index: int | None = None
+    tts_output_device_index: int | None = None
+    loop_device_kind: str = "output"  # 'output' or 'input'
+    loop_device_index: int | None = None
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
+
+
+_lock = RLock()
+_config = AppConfig(
+    stt_mode="api" if os.getenv("APP_STT_MODE", "api").lower() in {"api", "websocket"} else "local",
+    stt_api=STTApiConfig(
+        websocket_url=os.getenv("STT_WS_URL", ""),
+        auth_header=os.getenv("STT_WS_AUTH_HEADER", "Authorization"),
+        auth_token=os.getenv("STT_WS_AUTH_TOKEN", ""),
+        provider=os.getenv("STT_PROVIDER", "generic-ws"),
+        model=os.getenv("STT_MODEL", ""),
+        sample_rate=int(os.getenv("STT_SAMPLE_RATE", "16000") or 16000),
+        from_lang=os.getenv("STT_FROM_LANG", "zh"),
+        to_lang=os.getenv("STT_TO_LANG", "en"),
+        baidu_return_target_tts=os.getenv("BAIDU_RETURN_TARGET_TTS", "false").lower() in {"1", "true", "yes"},
+        baidu_tts_speaker=os.getenv("BAIDU_TTS_SPEAKER", "man"),
+        baidu_user_sn=os.getenv("BAIDU_USER_SN", ""),
+        baidu_app_id=os.getenv("BAIDU_APP_ID", ""),
+        baidu_api_key=os.getenv("BAIDU_API_KEY", ""),
+        baidu_secret_key=os.getenv("BAIDU_SECRET_KEY", ""),
+        aliyun_access_key_id=os.getenv("ALIYUN_ACCESS_KEY_ID", ""),
+        aliyun_access_key_secret=os.getenv("ALIYUN_ACCESS_KEY_SECRET", ""),
+        aliyun_app_key=os.getenv("ALIYUN_APP_KEY", ""),
+        aliyun_endpoint=os.getenv("ALIYUN_ENDPOINT", ""),
+        azure_speech_key=os.getenv("AZURE_SPEECH_KEY", ""),
+        azure_region=os.getenv("AZURE_REGION", ""),
+        azure_endpoint=os.getenv("AZURE_ENDPOINT", ""),
+        iflytek_app_id=os.getenv("IFLYTEK_APP_ID", ""),
+        iflytek_api_key=os.getenv("IFLYTEK_API_KEY", ""),
+        iflytek_api_secret=os.getenv("IFLYTEK_API_SECRET", ""),
+    ),
+    local_stt=LocalSTTConfig(
+        whisper_model=os.getenv("LOCAL_WHISPER_MODEL", "base"),
+    ),
+    target_game_process=os.getenv("TARGET_GAME_PROCESS", ""),
+    enforce_routing=os.getenv("ENFORCE_ROUTING", "false").lower() in {"1", "true", "yes"},
+    use_openai_translation=os.getenv("USE_OPENAI_TRANSLATION", "true").lower() in {"1", "true", "yes"},
+    use_openai_tts=os.getenv("USE_OPENAI_TTS", "true").lower() in {"1", "true", "yes"},
+    subtitles_only=os.getenv("SUBTITLES_ONLY", "false").lower() in {"1", "true", "yes"},
+    target_language=os.getenv("APP_LANGUAGE_TARGET", "zh-CN"),
+)
+
+
+def get_config() -> AppConfig:
+    with _lock:
+        return _config
+
+
+def update_config(new_config: AppConfig) -> None:
+    global _config
+    with _lock:
+        _config = new_config
+
+

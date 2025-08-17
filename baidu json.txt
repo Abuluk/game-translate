@@ -1,0 +1,234 @@
+实时语音翻译二进制响应报文序列化协议
+
+该协议仅在头部加了1个字节，作用是区分业务二进制响应报文的类型。第一个字节之后是payload数据。格式如下：
+
+Plain Text复制
+0字节      1字节
++---------+----------------+
+|  type   |    payload     +
++---------+----------------+
+
+WebSocket opcode：text
+WebSocket消息体序列化协议：json
+字段名
+类型
+是否必填
+字段说明
+type	string	必填，固定值	START
+from	string	必填	源语言，具体参考语言列表
+to	string	必填	目标语言，具体参考语言列表
+app_id	string	必填	用户app id
+app_key	string	必填	用户app key（即应用鉴权信息的API Key）
+sampling_rate	int	必填	采样率：8000、16000、44100
+return_target_tts	bool	选填	是否返回翻译结果的TTS播报结果
+false：不返回（默认）
+true：返回
+tts_speaker	string	选填	tts播报人声选项，当前目标语言是英语时支持配置：
+man：男声
+woman：女声
+user_sn	string	选填	用户输入sn
+
+开始报文示例：
+Plain Text复制
+{
+    "type": "START",
+    "from": "zh",
+    "to": "en",
+    "app_id": "xxx",
+    "app_key": "yyy",
+    "sampling_rate": 16000
+}
+响应报文格式
+
+WebSocket opcode：text
+WebSocket消息体序列化协议：json
+字段名
+类型
+说明
+code	int	错误码（具体见错误码说明）
+msg	string	错误信息
+data	object	请求结果，当且仅当code==0存在
+data.status	string	固定值STA：开始报文校验成功
+若服务端接受，服务端会返回确认开始报文：
+
+确认开始报文
+Plain Text复制
+{
+    "code": 0,
+    "msg": "Success",
+    "data": {
+        "status": "STA"
+    }
+}
+若服务端拒绝，会返回错误报文，并立刻断开和客户端的连接：
+
+错误报文
+Plain Text复制
+{
+    "code": 10001，
+    "msg": "invalid request param"
+}
+发送实时音频流报文
+
+报文格式
+
+WebSocket opcode：binary
+WebSocket消息体：音频流的二进制数据
+注意：
+
+服务端不处理在开始报文响应之前收到的音频流。
+建议每40ms发送一次音频包，即在采样率为16000Hz+位深16bits时，音频包的大小为 40ms 16000Hz 16bits = 1280 bytes。如果发送频率太高，则可能识别失败；如果发送频率太低，则会降低业务系统的实时性。
+若服务端超过30秒没有收到任何报文，服务端会报错并主动断开连接
+接受实时翻译结果报文
+
+报文格式：
+
+WebSocket opcode：text
+WebSocket消息体序列化协议：json
+字段名
+类型
+说明
+code	int	错误码（具体见错误码说明）
+msg	string	错误信息
+data	object	请求结果，当且仅当code==0存在
+data.status	string	状态标识
+TRN：翻译结果
+END：整个会话结束
+data.result	object	
+data.result.type	string	结果类型：
+MID：中间结果
+FIN：最终结果
+data.result.asr	string	一句话的中间识别结果
+data.result.asr_trans	string	中间翻译结果
+data.result.sentence	string	一句话的最终识别结果
+data.result.sentence_trans	string	最终翻译结果
+正常情况
+
+一句话的翻译中间结果
+Plain Text复制
+{
+    "code": 0,
+    "msg": "Success",
+    "data": {
+        "status": "TRN",
+        "result": {
+            "type": "MID",
+            "asr": "今天",
+            "asr_trans": "Today",
+            "sentence": "",
+            "sentence_trans": ""
+        }
+    }
+}
+一句话的翻译最终结果
+Plain Text复制
+{
+    "code": 0,
+    "msg": "Success",
+    "data": {
+        "status": "TRN",
+        "result": {
+            "type": "FIN",
+            "asr": "明天",
+            "asr_trans": "",
+            "sentence": "今天天气不错，",
+            "sentence_trans": "It's a nice day today,"
+        }
+    }
+}
+异常情况
+
+有些错误并不会断开连接，并且不会不影响业务继续使用，请参考错误码说明。
+
+错误报文
+Plain Text复制
+{
+    "code": 10001，
+    "msg": "invalid request param"
+}
+接受TTS播报报文
+
+如果开始报文中设置了return_target_tts==1时，则会返回TTS播报报文；否则不返回该报文。 报文格式：
+
+WebSocket opcode：binary
+WebSocket消息体序列化协议：实时语音翻译二进制响应报文，type=0x01，payload是TTS音频二进制，以mp3格式编码。
+即：
+
+WebSocket消息体
+Plain Text复制
+0字节      1字节
++---------+---------------------+
+|  0x01   | mp3格式的TTS二进制数据 +
++---------+---------------------+
+发送结束报文并关闭连接
+
+请求报文格式
+
+WebSocket opcode：text
+WebSocket消息体序列化协议：json
+字段名
+字段类型
+是否必填
+字段说明
+type	string	必填，固定值	FINISH
+Plain Text复制
+{
+    "type": "FINISH"
+}
+响应报文格式
+
+WebSocket opcode：text
+WebSocket消息体序列化协议：json
+字段名
+类型
+说明
+code	int	错误码（具体见错误码说明）
+msg	string	错误信息
+data	object	请求结果，当且仅当code==0存在
+data.status	string	状态标识END
+若服务端接受，服务端会返回确认结束报文：
+
+确认报文结束
+Plain Text复制
+{
+    "code": 0,
+    "msg": "Success",
+    "data": {
+        "status": "END"
+    }
+}
+若服务端拒绝，会返回错误报文。
+
+错误报文
+Plain Text复制
+{
+    "code": 10001，
+    "msg": "invalid request param"
+}
+错误码说明
+错误码
+错误信息
+解决方案
+0	成功	
+10000	服务器未知错误	记录报错信息反馈服务方
+10001	参数错误	检查报文格式
+10008	并发超限	请降低并发数
+20302	语言方向不支持	检查开始报文参数（from和to）
+20303	重复发送开始报文	不要重复发送开始报文
+20311	语音识别失败	记录报错信息反馈服务方。这一句报错，不影响后续识别
+20312	文本翻译失败	记录报错信息反馈服务方。这一句报错，不影响后续翻译
+20313	获取TTS失败	记录报错信息反馈服务方，这一句报错，不影响后续TTS合成
+20314	超时未收到报文	服务端超过30秒没有收到报文
+20315	翻译结果为空	反馈给服务方。这一句报错，不影响后续翻译
+20316	无效音频	请检查音频并重试
+31003	app id and app key do not match	用户appid和appkey不匹配，信息校验失败
+31004	input parameter format error	用户输入参数解析出错
+31005	resolve user parameters	用户输入参数解析出错
+31006	type format error	记用户输入帧类型出错(type字段)
+31007	frame type error	用户输入帧格式出错，可能是为校验成功，但是发送了数据帧
+31008	user connect had close	用户连接断开，但是仍在发送帧
+41000	inner server error!	内部服务错误
+41001	inner server error!	内部服务错误
+41002	inner server error!	内部服务错误
+41015	Open api concurrency limit reached!	用户并发数超限
+41017	Open api usage limit reached!	用户没有使用时长
