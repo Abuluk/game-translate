@@ -10,6 +10,7 @@ import sounddevice as sd
 from PySide6 import QtCore
 from dotenv import load_dotenv
 import scipy.signal as sps
+import time as time_module
 
 from app.audio.chunker import AudioChunker
 from app.audio.loopback_fallback import DefaultLoopbackReader
@@ -51,6 +52,7 @@ class BaseStreamWorker(QtCore.QThread):
         self.target_lang = target_lang
         self.chunker = AudioChunker(SAMPLE_RATE, FRAME_MS, chunk_frames=20, overlap_frames=5)
         self.stt_session: Optional[StreamingSTTSession] = None
+        self._ws_closed: bool = False
 
     def _start_system_session(self) -> None:
         cfg = get_config()
@@ -92,6 +94,13 @@ class BaseStreamWorker(QtCore.QThread):
             self.message.emit(f"[系统] {text}")
 
         cfg_sr = max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))
+        def on_closed(code: int, msg: str) -> None:
+            self._ws_closed = True
+            try:
+                self.event.emit(f"WS close: code={code}, msg={msg}")
+            except Exception:
+                pass
+
         self.stt_session.start(
             cfg_sr,
             on_tr,
@@ -101,7 +110,8 @@ class BaseStreamWorker(QtCore.QThread):
                 "provider": cfg.stt_api.provider,
                 "from": cfg.stt_api.from_lang,
                 "to": cfg.stt_api.to_lang,
-                "on_event": self.message.emit,
+                "on_event": self.event.emit,
+                "on_close": on_closed,
             },
         )
 
@@ -127,6 +137,7 @@ class SystemStreamWorker(BaseStreamWorker):
         # Will be set later when device is opened
         capture_rate_holder = {"sr": SAMPLE_RATE}
         api_rate_holder = {"sr": max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))}
+        last_send_ts_holder = {"t": time_module.time()}
 
         def callback(indata, frames, time, status):  # noqa: ARG001
             if self._stop_event.is_set():
@@ -153,8 +164,10 @@ class SystemStreamWorker(BaseStreamWorker):
                         end = min(start + max_samples, len(chunk))
                         self.stt_session.send_pcm16(chunk[start:end])
                         start = end
+                        last_send_ts_holder["t"] = time_module.time()
                 except Exception as e:
                     self.status.emit(f"系统翻译错误: {e}")
+                    self._ws_closed = True
 
         # Note: For WASAPI loopback, provide extra_settings=WasapiSettings(loopback=True)
         extra_settings = None
@@ -207,7 +220,7 @@ class SystemStreamWorker(BaseStreamWorker):
                 capture_rate = int(dev_info.get("default_samplerate") or 44100)
                 self.message.emit(f"系统捕获采样率: {capture_rate}")
                 # For streaming WS (e.g., Baidu) use ~40ms frames to avoid oversize frames
-                send_ms = 40
+                send_ms = max(10, min(100, int(get_config().stt_api.frame_ms or 40)))
                 self.chunker = AudioChunker(capture_rate, send_ms, chunk_frames=1, overlap_frames=0)
                 capture_rate_holder["sr"] = capture_rate
 
@@ -223,6 +236,23 @@ class SystemStreamWorker(BaseStreamWorker):
                     # Run system session main loop for native path
                     self._start_system_session()
                     while not self._stop_event.is_set():
+                        # heartbeat silence when idle
+                        now = time_module.time()
+                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                            try:
+                                dst_sr = api_rate_holder["sr"]
+                                silence = np.zeros(int(dst_sr * send_ms / 1000), dtype=np.int16)
+                                self.stt_session.send_pcm16(silence)
+                                last_send_ts_holder["t"] = now
+                            except Exception:
+                                self._ws_closed = True
+                        # auto reconnect if ws closed
+                        if self._ws_closed and not self._stop_event.is_set():
+                            self.event.emit("[WS] reconnecting…")
+                            self._ws_closed = False
+                            self._start_system_session()
+                            last_send_ts_holder["t"] = time_module.time()
                         self.msleep(50)
                     try:
                         if self.stt_session:
@@ -233,7 +263,7 @@ class SystemStreamWorker(BaseStreamWorker):
                 self.message.emit(f"主回环打开失败，尝试默认扬声器回环：{primary_err}")
                 # Fallback: capture default speaker via soundcard library
                 fallback_rate = 44100
-                send_ms = 40
+                send_ms = max(10, min(100, int(get_config().stt_api.frame_ms or 40)))
                 block = int(fallback_rate * send_ms / 1000)
                 self.chunker = AudioChunker(fallback_rate, send_ms, chunk_frames=1, overlap_frames=0)
                 with DefaultLoopbackReader(fallback_rate, block) as reader:
@@ -256,9 +286,22 @@ class SystemStreamWorker(BaseStreamWorker):
                                         end = min(start + max_samples, len(chunk))
                                         self.stt_session.send_pcm16(chunk[start:end])
                                         start = end
+                                        last_send_ts_holder["t"] = time_module.time()
                             except Exception as e:
                                 self.status.emit(f"系统翻译错误: {e}")
+                                self._ws_closed = True
                         self.msleep(5)
+                        # heartbeat silence
+                        now = time_module.time()
+                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                            try:
+                                api_sr = api_rate_holder["sr"]
+                                silence = np.zeros(int(api_sr * send_ms / 1000), dtype=np.int16)
+                                self.stt_session.send_pcm16(silence)
+                                last_send_ts_holder["t"] = now
+                            except Exception:
+                                self._ws_closed = True
                     try:
                         if self.stt_session:
                             self.stt_session.close()
@@ -302,6 +345,13 @@ class SystemStreamWorker(BaseStreamWorker):
 
                 # Use configured sample rate
                 cfg_sr = max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))
+                def on_closed(code: int, msg: str) -> None:
+                    self._ws_closed = True
+                    try:
+                        self.event.emit(f"WS close: code={code}, msg={msg}")
+                    except Exception:
+                        pass
+
                 self.stt_session.start(
                     cfg_sr,
                     on_tr,
@@ -312,6 +362,7 @@ class SystemStreamWorker(BaseStreamWorker):
                         "from": cfg.stt_api.from_lang,
                         "to": cfg.stt_api.to_lang,
                         "on_event": self.event.emit,
+                        "on_close": on_closed,
                     },
                 )
                 while not self._stop_event.is_set():

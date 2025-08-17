@@ -19,6 +19,9 @@ class STTApiConfig:
     # Language directions (provider-dependent; used by baidu)
     from_lang: str = "zh"
     to_lang: str = "en"
+    # Streaming controls
+    heartbeat_interval_sec: float = 5.0
+    frame_ms: int = 40
     # Baidu-specific options
     baidu_return_target_tts: bool = False
     baidu_tts_speaker: str = "man"
@@ -96,6 +99,8 @@ _config = AppConfig(
         sample_rate=int(os.getenv("STT_SAMPLE_RATE", "16000") or 16000),
         from_lang=os.getenv("STT_FROM_LANG", "zh"),
         to_lang=os.getenv("STT_TO_LANG", "en"),
+        heartbeat_interval_sec=float(os.getenv("STT_HEARTBEAT_SEC", "5.0") or 5.0),
+        frame_ms=int(os.getenv("STT_FRAME_MS", "40") or 40),
         baidu_return_target_tts=os.getenv("BAIDU_RETURN_TARGET_TTS", "false").lower() in {"1", "true", "yes"},
         baidu_tts_speaker=os.getenv("BAIDU_TTS_SPEAKER", "man"),
         baidu_user_sn=os.getenv("BAIDU_USER_SN", ""),

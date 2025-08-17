@@ -32,6 +32,7 @@ class WebSocketSTTClient:
         self._on_transcript: Optional[Callable[[str, bool], None]] = None
         self._on_tts: Optional[Callable[[np.ndarray], None]] = None
         self._on_event: Optional[Callable[[str], None]] = None
+        self._on_close: Optional[Callable[[int, str], None]] = None
         self._ready: bool = False
         self._pending_chunks: list[np.ndarray] = []
         self.provider: str = str(self.start_payload.get("provider", "generic-ws"))
@@ -45,6 +46,8 @@ class WebSocketSTTClient:
             self.provider = str(extra["provider"]) or self.provider
         if extra and callable(extra.get("on_event")):
             self._on_event = extra.get("on_event")
+        if extra and callable(extra.get("on_close")):
+            self._on_close = extra.get("on_close")
 
         def on_open(ws):  # noqa: ANN001
             prov = (self.start_payload.get("provider") or self.provider)
@@ -164,6 +167,11 @@ class WebSocketSTTClient:
         def on_close(ws, code, msg):  # noqa: ANN001
             if self._on_event:
                 self._on_event(f"WS close: code={code}, msg={msg}")
+            if self._on_close:
+                try:
+                    self._on_close(code, msg)
+                except Exception:
+                    pass
 
         header_list = [f"{k}: {v}" for k, v in self.headers.items()]
         self.ws = websocket.WebSocketApp(

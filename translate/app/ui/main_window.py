@@ -68,51 +68,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_stt_mode.addItems(["api", "local"])
         self.combo_stt_mode.setCurrentText(get_config().stt_mode)
         self.combo_stt_mode.currentTextChanged.connect(self.update_stt_mode_visibility)
-        stt_form.addRow("模式:", self.combo_stt_mode)
+        # provider on same row as mode (visible for api)
+        self.combo_provider = QtWidgets.QComboBox()
+        self.combo_provider.addItems(["generic-ws", "baidu", "aliyun", "azure", "iflytek"])
+        self.combo_provider.setCurrentText(get_config().stt_api.provider or "generic-ws")
+        self.combo_provider.currentTextChanged.connect(self.update_provider_visibility)
+        self.mode_provider_row = QtWidgets.QWidget()
+        mp_hl = QtWidgets.QHBoxLayout(self.mode_provider_row)
+        mp_hl.setContentsMargins(0, 0, 0, 0)
+        mp_hl.setSpacing(12)
+        mp_hl.addWidget(QtWidgets.QLabel("模式:"))
+        mp_hl.addWidget(self.combo_stt_mode, 1)
+        mp_hl.addWidget(QtWidgets.QLabel("提供商:"))
+        mp_hl.addWidget(self.combo_provider, 1)
+        stt_form.addRow(self.mode_provider_row)
 
         # API (WebSocket) settings panel
         self.api_panel = QtWidgets.QWidget()
         api_form = QtWidgets.QFormLayout(self.api_panel)
 
-        # Provider selection & common model
-        self.combo_provider = QtWidgets.QComboBox()
-        self.combo_provider.addItems(["generic-ws", "baidu", "aliyun", "azure", "iflytek"])
-        self.combo_provider.setCurrentText(get_config().stt_api.provider or "generic-ws")
-        self.combo_provider.currentTextChanged.connect(self.update_provider_visibility)
-
-        # model + from + to + sample rate in one row
+        # Compact row: model + from/to + sr + heartbeat + frame
         self.edit_stt_model = QtWidgets.QLineEdit(get_config().stt_api.model)
-        self.edit_stt_model.setMinimumWidth(240)
-        # language combos
-        langs = [
-            "auto", "zh", "zh-CN", "en", "ja", "ko", "fr", "de", "es", "ru", "pt",
-        ]
-        self.combo_from_lang = QtWidgets.QComboBox()
-        self.combo_from_lang.addItems(langs)
+        langs = ["auto", "zh", "zh-CN", "en", "ja", "ko", "fr", "de", "es", "ru", "pt"]
+        self.combo_from_lang = QtWidgets.QComboBox(); self.combo_from_lang.addItems(langs)
         self.combo_from_lang.setCurrentText(get_config().stt_api.from_lang or "auto")
-        self.combo_to_lang = QtWidgets.QComboBox()
-        self.combo_to_lang.addItems(langs)
+        self.combo_to_lang = QtWidgets.QComboBox(); self.combo_to_lang.addItems(langs)
         self.combo_to_lang.setCurrentText(get_config().stt_api.to_lang or "zh")
-        # sample rate selector
-        self.combo_sr = QtWidgets.QComboBox()
-        self.combo_sr.addItems(["8000", "16000", "44100"])
+        self.combo_sr = QtWidgets.QComboBox(); self.combo_sr.addItems(["8000", "16000", "44100"])
         self.combo_sr.setCurrentText(str(get_config().stt_api.sample_rate))
-
-        row_four = QtWidgets.QWidget()
-        row_hl = QtWidgets.QHBoxLayout(row_four)
-        row_hl.setContentsMargins(0, 0, 0, 0)
-        row_hl.setSpacing(12)
-        row_hl.addWidget(QtWidgets.QLabel("提供商:"))
-        row_hl.addWidget(self.combo_provider, 1)
-        row_hl.addWidget(QtWidgets.QLabel("模型:"))
-        row_hl.addWidget(self.edit_stt_model, 2)
-        row_hl.addWidget(QtWidgets.QLabel("from:"))
-        row_hl.addWidget(self.combo_from_lang, 1)
-        row_hl.addWidget(QtWidgets.QLabel("to:"))
-        row_hl.addWidget(self.combo_to_lang, 1)
-        row_hl.addWidget(QtWidgets.QLabel("采样率:"))
-        row_hl.addWidget(self.combo_sr, 1)
-        api_form.addRow(row_four)
+        self.spin_heartbeat = QtWidgets.QDoubleSpinBox(); self.spin_heartbeat.setRange(1.0, 60.0); self.spin_heartbeat.setSingleStep(0.5); self.spin_heartbeat.setValue(float(get_config().stt_api.heartbeat_interval_sec))
+        self.spin_frame = QtWidgets.QSpinBox(); self.spin_frame.setRange(10, 100); self.spin_frame.setSingleStep(5); self.spin_frame.setValue(int(get_config().stt_api.frame_ms))
+        # model width about 2x from combo
+        try:
+            from_w = self.combo_from_lang.sizeHint().width()
+            self.edit_stt_model.setMaximumWidth(max(int(from_w * 2), 180))
+        except Exception:
+            self.edit_stt_model.setMaximumWidth(240)
+        row_compact = QtWidgets.QWidget()
+        rc_hl = QtWidgets.QHBoxLayout(row_compact)
+        rc_hl.setContentsMargins(0, 0, 0, 0)
+        rc_hl.setSpacing(12)
+        rc_hl.addWidget(QtWidgets.QLabel("模型:")); rc_hl.addWidget(self.edit_stt_model, 2)
+        rc_hl.addWidget(QtWidgets.QLabel("from:")); rc_hl.addWidget(self.combo_from_lang, 1)
+        rc_hl.addWidget(QtWidgets.QLabel("to:")); rc_hl.addWidget(self.combo_to_lang, 1)
+        rc_hl.addWidget(QtWidgets.QLabel("采样率:")); rc_hl.addWidget(self.combo_sr, 1)
+        rc_hl.addWidget(QtWidgets.QLabel("心跳(s):")); rc_hl.addWidget(self.spin_heartbeat, 1)
+        rc_hl.addWidget(QtWidgets.QLabel("帧长(ms):")); rc_hl.addWidget(self.spin_frame, 1)
+        api_form.addRow(row_compact)
 
         # Generic WS credentials
         self.generic_panel = QtWidgets.QWidget()
@@ -122,8 +124,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_ws_token = QtWidgets.QLineEdit(get_config().stt_api.auth_token)
         self.edit_ws_token.setEchoMode(QtWidgets.QLineEdit.Password)
         gen_form.addRow("WS URL:", self.edit_ws_url)
-        gen_form.addRow("Auth Header:", self.edit_ws_header)
-        gen_form.addRow("Auth Token:", self.edit_ws_token)
+        # two-in-one row for header+token
+        row_ht = QtWidgets.QWidget()
+        ht_hl = QtWidgets.QHBoxLayout(row_ht)
+        ht_hl.setContentsMargins(0, 0, 0, 0)
+        ht_hl.setSpacing(12)
+        ht_hl.addWidget(QtWidgets.QLabel("Auth Header:"))
+        ht_hl.addWidget(self.edit_ws_header, 1)
+        ht_hl.addWidget(QtWidgets.QLabel("Auth Token:"))
+        ht_hl.addWidget(self.edit_ws_token, 1)
+        gen_form.addRow(row_ht)
         api_form.addRow(self.generic_panel)
 
         # Baidu
@@ -134,8 +144,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_baidu_secret_key = QtWidgets.QLineEdit(get_config().stt_api.baidu_secret_key)
         self.edit_baidu_api_key.setEchoMode(QtWidgets.QLineEdit.Password)
         self.edit_baidu_secret_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        bd_form.addRow("Baidu AppID:", self.edit_baidu_appid)
-        bd_form.addRow("API Key:", self.edit_baidu_api_key)
+        # AppID + API Key in one row
+        row_bk = QtWidgets.QWidget()
+        bk_hl = QtWidgets.QHBoxLayout(row_bk)
+        bk_hl.setContentsMargins(0, 0, 0, 0)
+        bk_hl.setSpacing(12)
+        bk_hl.addWidget(QtWidgets.QLabel("Baidu AppID:"))
+        bk_hl.addWidget(self.edit_baidu_appid, 1)
+        bk_hl.addWidget(QtWidgets.QLabel("API Key:"))
+        bk_hl.addWidget(self.edit_baidu_api_key, 1)
+        bd_form.addRow(row_bk)
         bd_form.addRow("Secret Key:", self.edit_baidu_secret_key)
         # Baidu optional
         self.check_baidu_return_tts = QtWidgets.QCheckBox("返回TTS音频")
@@ -145,8 +163,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_baidu_tts_speaker.setCurrentText(get_config().stt_api.baidu_tts_speaker or "man")
         self.edit_baidu_user_sn = QtWidgets.QLineEdit(get_config().stt_api.baidu_user_sn)
         bd_form.addRow(self.check_baidu_return_tts)
-        bd_form.addRow("TTS Speaker:", self.combo_baidu_tts_speaker)
-        bd_form.addRow("User SN:", self.edit_baidu_user_sn)
+        row_ts = QtWidgets.QWidget()
+        ts_hl = QtWidgets.QHBoxLayout(row_ts)
+        ts_hl.setContentsMargins(0, 0, 0, 0)
+        ts_hl.setSpacing(12)
+        ts_hl.addWidget(QtWidgets.QLabel("TTS Speaker:"))
+        ts_hl.addWidget(self.combo_baidu_tts_speaker, 1)
+        ts_hl.addWidget(QtWidgets.QLabel("User SN:"))
+        ts_hl.addWidget(self.edit_baidu_user_sn, 1)
+        bd_form.addRow(row_ts)
         api_form.addRow(self.baidu_panel)
 
         # Aliyun
@@ -337,10 +362,6 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.combo_out.findData(cfg.tts_output_device_index)
             if idx >= 0:
                 self.combo_out.setCurrentIndex(idx)
-        # Persist device selections immediately when changed
-        self.combo_mic.currentIndexChanged.connect(self._persist_devices)
-        self.combo_out.currentIndexChanged.connect(self._persist_devices)
-        self.combo_loop.currentIndexChanged.connect(self._persist_devices)
         # Emit basic device info
         try:
             import sounddevice as sd
@@ -414,6 +435,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 sample_rate=int(self.combo_sr.currentText()),
                 from_lang=self.combo_from_lang.currentText().strip() or "auto",
                 to_lang=self.combo_to_lang.currentText().strip() or "zh",
+                heartbeat_interval_sec=float(self.spin_heartbeat.value()),
+                frame_ms=int(self.spin_frame.value()),
                 baidu_app_id=self.edit_baidu_appid.text().strip(),
                 baidu_api_key=self.edit_baidu_api_key.text().strip(),
                 baidu_secret_key=self.edit_baidu_secret_key.text().strip(),
@@ -507,15 +530,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg = get_config()
         save_persisted_config(cfg)
 
-    def _persist_devices(self) -> None:
-        cfg = get_config()
-        cfg.mic_device_index = self.combo_mic.currentData()
-        cfg.tts_output_device_index = self.combo_out.currentData()
-        sel = self.combo_loop.currentData()
-        cfg.loop_device_kind = sel[0] if isinstance(sel, tuple) else "output"
-        cfg.loop_device_index = sel[1] if isinstance(sel, tuple) else sel
-        save_persisted_config(cfg)
-
     # Helpers
     def wrap_layout(self, layout: QtWidgets.QLayout) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -529,6 +543,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_stt_mode_visibility(self, mode: str) -> None:
         is_api = (mode == "api")
+        try:
+            self.mode_provider_row.setVisible(True)
+            self.combo_provider.setVisible(is_api)
+        except Exception:
+            pass
         self.api_panel.setVisible(is_api)
         self.local_panel.setVisible(not is_api)
 
