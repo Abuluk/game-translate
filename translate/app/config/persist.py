@@ -27,12 +27,15 @@ def load_persisted_config() -> Optional[AppConfig]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         # Backward compatible: construct AppConfig by unpacking dicts
-        from app.config.runtime_config import STTApiConfig, LocalSTTConfig
+        from app.config.runtime_config import STTApiConfig, LocalSTTConfig, LocalGGUFConfig, LocalVadConfig, LocalTTSConfig
 
         cfg = AppConfig(
             stt_mode=data.get("stt_mode", "api"),
             stt_api=STTApiConfig(**data.get("stt_api", {})),
             local_stt=LocalSTTConfig(**data.get("local_stt", {})),
+            local_gguf=LocalGGUFConfig(**data.get("local_gguf", {})) if data.get("local_gguf") is not None else None,  # type: ignore[arg-type]
+            local_vad=LocalVadConfig(**data.get("local_vad", {})) if data.get("local_vad") is not None else None,  # type: ignore[arg-type]
+            local_tts=LocalTTSConfig(**data.get("local_tts", {})) if data.get("local_tts") is not None else None,  # type: ignore[arg-type]
             target_game_process=data.get("target_game_process", ""),
             enforce_routing=bool(data.get("enforce_routing", False)),
             subtitles_only=bool(data.get("subtitles_only", False)),

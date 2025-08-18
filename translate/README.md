@@ -53,12 +53,17 @@ python -m app.main
   - 点击“开始（麦克风翻译→TTS）”将你的话翻译并合成为目标语言，输出到选定设备
 
 ### 配置（可在界面中直接设置）
-- **识别模式**：`api`（WebSocket 真流）或 `local`（本地 faster-whisper）
+- **识别模式**：`api`（WebSocket 真流）或 `local`（本地 faster-whisper）或 `local-gguf`（whisper.cpp + GGUF）
 - **WebSocket STT**：`WS URL`、`Auth Header`、`Auth Token`
 - **OpenAI**：`API Key`、`STT 模型`、`TTS 模型`、`翻译模型`
-- **本地模型**：`Whisper 模型`（如 `base`/`small`）
+- **本地模型（faster-whisper）**：`Whisper 模型目录`（如解压后的 `faster-whisper-small`）
+- **本地模型（whisper.cpp）**：`whisper.cpp 可执行文件`、`GGUF 模型路径`
 
-注：已支持 WebSocket 真流；若后端遵循 `{type:start|audio|transcript|stop}` 简单协议即可直接接入。
+注：
+- 已支持 WebSocket 真流；若后端遵循 `{type:start|audio|transcript|stop}` 简单协议即可直接接入。
+- 本地模式说明：
+  - `local` 使用 faster-whisper（CTranslate2 模型），支持离线；当目标语言选择 `en` 时会使用 Whisper 的 translate 任务，仅能翻译到英语。
+  - `local-gguf` 使用 whisper.cpp（GGUF 模型），同样离线；当目标语言为 `en` 时启用 `-tr` 翻译到英语，否则进行原语种转写。
 
 ### 常见问题
 - 听不到 TTS 或游戏未收到麦克风：请确认

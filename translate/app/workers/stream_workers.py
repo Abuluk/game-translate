@@ -17,6 +17,7 @@ from app.audio.loopback_fallback import DefaultLoopbackReader
 from app.providers.streaming_stt_base import StreamingSTTSession
 from app.providers.ws_stt_provider import WebSocketSTTClient
 from app.providers.local_stt_provider import LocalStreamingSTT
+from app.providers.local_gguf_provider import WhisperCppSession
 from app.config.runtime_config import get_config
 
 
@@ -57,7 +58,18 @@ class BaseStreamWorker(QtCore.QThread):
     def _start_system_session(self) -> None:
         cfg = get_config()
         if cfg.stt_mode == "local":
-            self.stt_session = LocalStreamingSTT(cfg.local_stt.whisper_model)
+            self.stt_session = LocalStreamingSTT(
+                cfg.local_stt.whisper_model,
+                cfg.stt_api.from_lang,
+                cfg.stt_api.to_lang,
+            )
+        elif cfg.stt_mode == "local-gguf":
+            self.stt_session = WhisperCppSession(
+                cfg.local_gguf.whisper_cpp_exe,
+                cfg.local_gguf.whisper_cpp_model,
+                cfg.stt_api.from_lang,
+                cfg.stt_api.to_lang,
+            )
         else:
             if not cfg.stt_api.websocket_url:
                 self.message.emit("[WS] 未配置 WebSocket URL（模式=api），请在‘识别来源’填写 WS URL 后再开始")
@@ -112,6 +124,15 @@ class BaseStreamWorker(QtCore.QThread):
                 "to": cfg.stt_api.to_lang,
                 "on_event": self.event.emit,
                 "on_close": on_closed,
+                "local_vad": {
+                    "energy_threshold": int(get_config().local_vad.energy_threshold) if hasattr(get_config(), "local_vad") else 500,
+                    "silence_frames": int(get_config().local_vad.silence_frames) if hasattr(get_config(), "local_vad") else 10,
+                    "max_segment_ms": int(get_config().local_vad.max_segment_ms) if hasattr(get_config(), "local_vad") else 6000,
+                    "noise_alpha": float(get_config().local_vad.noise_alpha) if hasattr(get_config(), "local_vad") else 0.05,
+                    "noise_multiplier": float(get_config().local_vad.noise_multiplier) if hasattr(get_config(), "local_vad") else 2.0,
+                    "preview_enabled": bool(get_config().local_vad.preview_enabled) if hasattr(get_config(), "local_vad") else False,
+                    "preview_interval_ms": int(get_config().local_vad.preview_interval_ms) if hasattr(get_config(), "local_vad") else 800,
+                },
             },
         )
 
@@ -138,6 +159,7 @@ class SystemStreamWorker(BaseStreamWorker):
         capture_rate_holder = {"sr": SAMPLE_RATE}
         api_rate_holder = {"sr": max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))}
         last_send_ts_holder = {"t": time_module.time()}
+        last_dbg_ts_holder = {"t": 0.0}
 
         def callback(indata, frames, time, status):  # noqa: ARG001
             if self._stop_event.is_set():
@@ -163,6 +185,13 @@ class SystemStreamWorker(BaseStreamWorker):
                     while start < len(chunk):
                         end = min(start + max_samples, len(chunk))
                         self.stt_session.send_pcm16(chunk[start:end])
+                        now_dbg = time_module.time()
+                        if now_dbg - last_dbg_ts_holder["t"] > 1.0:
+                            try:
+                                self.event.emit(f"DEBUG send pcm len={end-start} sr={dst_sr}")
+                            except Exception:
+                                pass
+                            last_dbg_ts_holder["t"] = now_dbg
                         start = end
                         last_send_ts_holder["t"] = time_module.time()
                 except Exception as e:
@@ -285,6 +314,12 @@ class SystemStreamWorker(BaseStreamWorker):
                                     while start < len(chunk):
                                         end = min(start + max_samples, len(chunk))
                                         self.stt_session.send_pcm16(chunk[start:end])
+                                        now_dbg = time_module.time()
+                                        if now_dbg - last_dbg_ts_holder["t"] > 1.0:
+                                            try:
+                                                self.event.emit(f"DEBUG send pcm len={end-start} sr={api_sr}")
+                                            except Exception:
+                                                pass
                                         start = end
                                         last_send_ts_holder["t"] = time_module.time()
                             except Exception as e:
@@ -336,11 +371,19 @@ class SystemStreamWorker(BaseStreamWorker):
                     }
                     self.stt_session = WebSocketSTTClient(cfg.stt_api.websocket_url, headers=headers, start_payload=start_payload)
                 else:
-                    self.stt_session = LocalStreamingSTT(cfg.local_stt.whisper_model)
+                    self.stt_session = LocalStreamingSTT(
+                        cfg.local_stt.whisper_model,
+                        cfg.stt_api.from_lang,
+                        cfg.stt_api.to_lang,
+                    )
 
                 def on_tr(text: str, is_final: bool) -> None:
                     if not text:
                         return
+                    try:
+                        self.event.emit(f"DEBUG recv transcript final={is_final} len={len(text)}")
+                    except Exception:
+                        pass
                     self.message.emit(f"[系统] {text}")
 
                 # Use configured sample rate
@@ -489,7 +532,11 @@ class MicStreamWorker(BaseStreamWorker):
                     }
                     self.stt_session = WebSocketSTTClient(cfg.stt_api.websocket_url, headers=headers, start_payload=start_payload)
                 else:
-                    self.stt_session = LocalStreamingSTT(cfg.local_stt.whisper_model)
+                    self.stt_session = LocalStreamingSTT(
+                        cfg.local_stt.whisper_model,
+                        cfg.stt_api.from_lang,
+                        cfg.stt_api.to_lang,
+                    )
 
                 def on_tr(text: str, is_final: bool) -> None:
                     if not text:

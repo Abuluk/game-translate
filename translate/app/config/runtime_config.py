@@ -53,6 +53,28 @@ class LocalSTTConfig:
 
 
 @dataclass
+class LocalTTSConfig:
+    tts_model_dir: str = ""
+
+
+@dataclass
+class LocalGGUFConfig:
+    whisper_cpp_exe: str = ""  # path to whisper.cpp executable (main.exe)
+    whisper_cpp_model: str = ""  # path to .gguf model file
+
+
+@dataclass
+class LocalVadConfig:
+    energy_threshold: int = 500
+    silence_frames: int = 10
+    max_segment_ms: int = 6000
+    noise_alpha: float = 0.05
+    noise_multiplier: float = 2.0
+    preview_enabled: bool = False
+    preview_interval_ms: int = 800
+
+
+@dataclass
 class OverlayConfig:
     font_size: int = 28
     color_hex: str = "#FFFFFF"
@@ -67,9 +89,12 @@ class OverlayConfig:
 @dataclass
 class AppConfig:
     # stt_mode: 'api' (websocket true streaming) or 'local'
-    stt_mode: str = "api"
+    stt_mode: str = "api"  # values: api | local | local-gguf
     stt_api: STTApiConfig = field(default_factory=STTApiConfig)
     local_stt: LocalSTTConfig = field(default_factory=LocalSTTConfig)
+    local_tts: LocalTTSConfig = field(default_factory=LocalTTSConfig)
+    local_vad: LocalVadConfig = field(default_factory=LocalVadConfig)
+    local_gguf: LocalGGUFConfig = field(default_factory=LocalGGUFConfig)
     # Game targeting
     target_game_process: str = ""  # e.g. game.exe
     enforce_routing: bool = False   # hint UI to remind routing
@@ -89,7 +114,7 @@ class AppConfig:
 
 _lock = RLock()
 _config = AppConfig(
-    stt_mode="api" if os.getenv("APP_STT_MODE", "api").lower() in {"api", "websocket"} else "local",
+    stt_mode=(lambda v: v if v in {"api", "local", "local-gguf"} else ("api" if v in {"api", "websocket"} else "local"))(os.getenv("APP_STT_MODE", "api").lower()),
     stt_api=STTApiConfig(
         websocket_url=os.getenv("STT_WS_URL", ""),
         auth_header=os.getenv("STT_WS_AUTH_HEADER", "Authorization"),
@@ -120,6 +145,22 @@ _config = AppConfig(
     ),
     local_stt=LocalSTTConfig(
         whisper_model=os.getenv("LOCAL_WHISPER_MODEL", "base"),
+    ),
+    local_tts=LocalTTSConfig(
+        tts_model_dir=os.getenv("LOCAL_TTS_MODEL_DIR", ""),
+    ),
+    local_gguf=LocalGGUFConfig(
+        whisper_cpp_exe=os.getenv("WHISPER_CPP_EXE", ""),
+        whisper_cpp_model=os.getenv("WHISPER_CPP_MODEL", ""),
+    ),
+    local_vad=LocalVadConfig(
+        energy_threshold=int(os.getenv("APP_LOCAL_VAD_ENERGY", "500") or 500),
+        silence_frames=int(os.getenv("APP_LOCAL_VAD_SILENCE_FRAMES", "10") or 10),
+        max_segment_ms=int(os.getenv("APP_LOCAL_MAX_SEGMENT_MS", "6000") or 6000),
+        noise_alpha=float(os.getenv("APP_LOCAL_VAD_NOISE_ALPHA", "0.05") or 0.05),
+        noise_multiplier=float(os.getenv("APP_LOCAL_VAD_NOISE_X", "2.0") or 2.0),
+        preview_enabled=os.getenv("APP_LOCAL_PREVIEW", "false").lower() in {"1", "true", "yes"},
+        preview_interval_ms=int(os.getenv("APP_LOCAL_PREVIEW_MS", "800") or 800),
     ),
     target_game_process=os.getenv("TARGET_GAME_PROCESS", ""),
     enforce_routing=os.getenv("ENFORCE_ROUTING", "false").lower() in {"1", "true", "yes"},
