@@ -27,6 +27,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
+        # Split top (config) and bottom (output/log) so bottom stays stable on mode changes
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.top_panel = QtWidgets.QWidget(); self.top_layout = QtWidgets.QVBoxLayout(self.top_panel)
+        self.bottom_panel = QtWidgets.QWidget(); self.bottom_layout = QtWidgets.QVBoxLayout(self.bottom_panel)
+        self.splitter.addWidget(self.top_panel)
+        self.splitter.addWidget(self.bottom_panel)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.splitter, 1)
 
         # Target language selector
         lang_layout = QtWidgets.QHBoxLayout()
@@ -39,7 +48,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_lang.setCurrentText(get_config().target_language or os.getenv("APP_LANGUAGE_TARGET", "zh-CN"))
         lang_layout.addWidget(self.combo_lang, 1)
 
-        layout.addLayout(lang_layout)
+        self.top_layout.addLayout(lang_layout)
 
         # Devices
         device_group = QtWidgets.QGroupBox("设备设置")
@@ -54,16 +63,17 @@ class MainWindow(QtWidgets.QMainWindow):
         device_form.addRow("麦克风输入:", self.combo_mic)
         device_form.addRow("TTS 输出设备:", self.combo_out)
         device_form.addRow("系统音频(Loopback):", self.combo_loop)
-        layout.addWidget(device_group)
+        self.top_layout.addWidget(device_group)
         # Subtitles only
         self.check_subtitles_only = QtWidgets.QCheckBox("翻译仅用于字幕（不使用麦克风与TTS回放）")
         self.check_subtitles_only.setChecked(get_config().subtitles_only)
         self.check_subtitles_only.toggled.connect(lambda _: self.update_tts_visibility())
-        layout.addWidget(self.check_subtitles_only)
+        self.top_layout.addWidget(self.check_subtitles_only)
 
         # STT Provider settings
         stt_group = QtWidgets.QGroupBox("识别来源")
         stt_form = QtWidgets.QFormLayout(stt_group)
+        self._stt_group = stt_group
 
         self.combo_stt_mode = QtWidgets.QComboBox()
         self.combo_stt_mode.addItems(["api", "local", "local-gguf"])
@@ -309,11 +319,12 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_save_cfg.clicked.connect(self.on_apply_config)
         stt_form.addRow(btn_save_cfg)
 
-        layout.addWidget(stt_group)
+        self.top_layout.addWidget(stt_group)
         # Set initial visibility
         self.update_stt_mode_visibility(self.combo_stt_mode.currentText())
         self.update_provider_visibility(self.combo_provider.currentText())
         self.update_tts_visibility()
+        
 
         # Target game section
         game_group = QtWidgets.QGroupBox("针对某个游戏（可选）")
@@ -334,12 +345,12 @@ class MainWindow(QtWidgets.QMainWindow):
         game_form.addRow("游戏进程:", hl)
         game_form.addRow(self.check_enforce)
 
-        layout.addWidget(game_group)
+        self.top_layout.addWidget(game_group)
 
         # Overlay settings button
         self.btn_overlay_settings = QtWidgets.QPushButton("字幕设置…")
         self.btn_overlay_settings.clicked.connect(self.on_open_overlay_settings)
-        layout.addWidget(self.btn_overlay_settings)
+        self.top_layout.addWidget(self.btn_overlay_settings)
 
         # Buttons
         btn_layout = QtWidgets.QHBoxLayout()
@@ -354,19 +365,19 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_layout.addSpacing(20)
         btn_layout.addWidget(self.btn_mic_start)
         btn_layout.addWidget(self.btn_mic_stop)
-        layout.addLayout(btn_layout)
+        self.top_layout.addLayout(btn_layout)
 
         # Transcript view
         self.text_view = QtWidgets.QPlainTextEdit()
         self.text_view.setReadOnly(True)
-        layout.addWidget(self.text_view, 1)
+        self.bottom_layout.addWidget(self.text_view, 1)
 
         # Connection event log
         self.event_log = QtWidgets.QPlainTextEdit()
         self.event_log.setReadOnly(True)
         self.event_log.setMaximumHeight(120)
         self.event_log.setPlaceholderText("连接事件日志…")
-        layout.addWidget(self.event_log)
+        self.bottom_layout.addWidget(self.event_log)
 
         # Footer
         self.status = QtWidgets.QStatusBar()
@@ -683,6 +694,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.api_panel.setVisible(is_api)
         self.local_panel.setVisible(mode == "local")
         self.local_gguf_panel.setVisible(mode == "local-gguf")
+        
 
     def update_provider_visibility(self, provider: str) -> None:
         # Always show generic panel (WS URL/Auth/模型/采样率)
@@ -705,6 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.local_tts_row_widget.setVisible(show)
         except Exception:
             pass
+        
 
     
 

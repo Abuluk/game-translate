@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Optional
+from typing import Optional, Callable
 import collections
 
 import numpy as np
@@ -55,8 +55,9 @@ class BaseStreamWorker(QtCore.QThread):
         self.stt_session: Optional[StreamingSTTSession] = None
         self._ws_closed: bool = False
 
-    def _start_system_session(self) -> None:
+    def _start_system_session(self, on_tts: Optional[Callable[[np.ndarray], None]] = None) -> None:
         cfg = get_config()
+        # No language normalization; pass-through UI values
         if cfg.stt_mode == "local":
             self.stt_session = LocalStreamingSTT(
                 cfg.local_stt.whisper_model,
@@ -116,7 +117,7 @@ class BaseStreamWorker(QtCore.QThread):
         self.stt_session.start(
             cfg_sr,
             on_tr,
-            None,
+            on_tts,
             {
                 "target_lang": self.target_lang,
                 "provider": cfg.stt_api.provider,
@@ -160,6 +161,48 @@ class SystemStreamWorker(BaseStreamWorker):
         api_rate_holder = {"sr": max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))}
         last_send_ts_holder = {"t": time_module.time()}
         last_dbg_ts_holder = {"t": 0.0}
+
+        # 如果未勾选“仅字幕”但未传入 TTS 输出设备，尝试使用系统默认输出
+        try:
+            if not bool(get_config().subtitles_only) and self.sys_out_device_index is None:
+                import sounddevice as _sd
+                try:
+                    default_out = _sd.default.device[1]
+                except Exception:
+                    default_out = None
+                if default_out is not None:
+                    self.sys_out_device_index = int(default_out)
+                    try:
+                        self.event.emit(f"使用系统默认输出设备用于TTS: {self.sys_out_device_index}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # TTS playback queue and callback (only used当启用播放)
+        playback_queue: collections.deque[np.ndarray] = collections.deque()
+        # 将在打开输出设备前设定实际播放采样率
+        play_sr_holder = {"sr": max(8000, min(44100, int(get_config().stt_api.sample_rate or SAMPLE_RATE)))}
+
+        def on_tts_playback(pcm: np.ndarray) -> None:
+            if pcm.size == 0:
+                return
+            try:
+                src_sr = int(api_rate_holder["sr"])  # WS/Provider返回的PCM采样率
+                dst_sr = int(play_sr_holder["sr"])   # 输出设备采样率
+                data = pcm
+                if src_sr != dst_sr:
+                    data = _resample_pcm16(pcm, src_sr, dst_sr)
+                playback_queue.append(data.astype(np.int16))
+                try:
+                    # 调试：打印统计值，判断是否近零
+                    peak = int(np.max(np.abs(data))) if data.size > 0 else 0
+                    rms = float(np.sqrt(np.mean((data.astype(np.float32) / 32767.0) ** 2))) if data.size > 0 else 0.0
+                    self.event.emit(f"ENQUEUE TTS: {data.size} samples @{dst_sr}Hz (src={src_sr}) peak={peak} rms={rms:.4f}")
+                except Exception:
+                    pass
+            except Exception:
+                playback_queue.append(pcm.astype(np.int16))
 
         def callback(indata, frames, time, status):  # noqa: ARG001
             if self._stop_event.is_set():
@@ -262,32 +305,144 @@ class SystemStreamWorker(BaseStreamWorker):
                     callback=callback,
                     extra_settings=extra_settings,
                 ):
-                    # Run system session main loop for native path
-                    self._start_system_session()
-                    while not self._stop_event.is_set():
-                        # heartbeat silence when idle
-                        now = time_module.time()
-                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
-                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                    # 可选：同时打开输出设备用于TTS播放
+                    if self.sys_out_device_index is not None:
+                        def out_callback(outdata, frames, time, status):  # noqa: ARG001
+                            if self._stop_event.is_set():
+                                raise sd.CallbackStop
+                            outdata.fill(0)
+                            if playback_queue:
+                                buf = playback_queue.popleft()
+                                needed = frames
+                                if len(buf) > needed:
+                                    data = buf[:needed]
+                                    remainder = buf[needed:]
+                                    playback_queue.appendleft(remainder)
+                                else:
+                                    data = buf
+                                out = (data.astype(np.float32) / 32767.0).reshape(-1, 1)
+                                outdata[: len(out), 0] = out[:, 0]
+
+                        # 候选播放采样率：设备默认 → 44100 → 48000 → 16000
+                        sr_candidates = []
+                        try:
+                            out_info = sd.query_devices(self.sys_out_device_index)
+                            default_sr = int(out_info.get("default_samplerate") or 44100)
+                            sr_candidates.append(default_sr)
+                        except Exception:
+                            pass
+                        for cand in [44100, 48000, 16000]:
+                            if cand not in sr_candidates:
+                                sr_candidates.append(cand)
+
+                        opened = False
+                        last_err = None
+                        for play_sr in sr_candidates:
                             try:
-                                dst_sr = api_rate_holder["sr"]
-                                silence = np.zeros(int(dst_sr * send_ms / 1000), dtype=np.int16)
-                                self.stt_session.send_pcm16(silence)
-                                last_send_ts_holder["t"] = now
+                                play_sr_holder["sr"] = play_sr
+                                with sd.OutputStream(
+                                    device=self.sys_out_device_index,
+                                    samplerate=play_sr,
+                                    channels=1,
+                                    dtype="float32",
+                                    blocksize=int(play_sr * FRAME_MS / 1000),
+                                    callback=out_callback,
+                                ):
+                                    try:
+                                        self.event.emit(f"TTS OutputStream opened: device={self.sys_out_device_index} sr={play_sr}")
+                                    except Exception:
+                                        pass
+                                    # Run system session main loop for native path
+                                    self._start_system_session(on_tts_playback)
+                                    while not self._stop_event.is_set():
+                                        # heartbeat silence when idle
+                                        now = time_module.time()
+                                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                            try:
+                                                dst_sr = api_rate_holder["sr"]
+                                                silence = np.zeros(int(dst_sr * send_ms / 1000), dtype=np.int16)
+                                                self.stt_session.send_pcm16(silence)
+                                                last_send_ts_holder["t"] = now
+                                            except Exception:
+                                                self._ws_closed = True
+                                        # auto reconnect if ws closed
+                                        if self._ws_closed and not self._stop_event.is_set():
+                                            self.event.emit("[WS] reconnecting…")
+                                            self._ws_closed = False
+                                            self._start_system_session(on_tts_playback)
+                                            last_send_ts_holder["t"] = time_module.time()
+                                        self.msleep(50)
+                                    try:
+                                        if self.stt_session:
+                                            self.stt_session.close()
+                                    finally:
+                                        self.stt_session = None
+                                    opened = True
+                                    break
+                            except Exception as e:
+                                last_err = e
+                                try:
+                                    self.event.emit(f"TTS OutputStream open failed sr={play_sr}: {e}")
+                                except Exception:
+                                    pass
+                                continue
+                        if not opened:
+                            try:
+                                self.event.emit(f"TTS 播放禁用：无法打开输出设备 {self.sys_out_device_index}，最后错误: {last_err}")
                             except Exception:
-                                self._ws_closed = True
-                        # auto reconnect if ws closed
-                        if self._ws_closed and not self._stop_event.is_set():
-                            self.event.emit("[WS] reconnecting…")
-                            self._ws_closed = False
-                            self._start_system_session()
-                            last_send_ts_holder["t"] = time_module.time()
-                        self.msleep(50)
-                    try:
-                        if self.stt_session:
-                            self.stt_session.close()
-                    finally:
-                        self.stt_session = None
+                                pass
+                            # 继续运行但不播放
+                            self._start_system_session(None)
+                            while not self._stop_event.is_set():
+                                now = time_module.time()
+                                hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                                if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                    try:
+                                        dst_sr = api_rate_holder["sr"]
+                                        silence = np.zeros(int(dst_sr * send_ms / 1000), dtype=np.int16)
+                                        self.stt_session.send_pcm16(silence)
+                                        last_send_ts_holder["t"] = now
+                                    except Exception:
+                                        self._ws_closed = True
+                                if self._ws_closed and not self._stop_event.is_set():
+                                    self.event.emit("[WS] reconnecting…")
+                                    self._ws_closed = False
+                                    self._start_system_session(None)
+                                    last_send_ts_holder["t"] = time_module.time()
+                                self.msleep(50)
+                            try:
+                                if self.stt_session:
+                                    self.stt_session.close()
+                            finally:
+                                self.stt_session = None
+                    else:
+                        # 仅字幕：不打开输出设备，不注册 TTS 回调
+                        self._start_system_session(None)
+                        while not self._stop_event.is_set():
+                            # heartbeat silence when idle
+                            now = time_module.time()
+                            hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                            if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                try:
+                                    dst_sr = api_rate_holder["sr"]
+                                    silence = np.zeros(int(dst_sr * send_ms / 1000), dtype=np.int16)
+                                    self.stt_session.send_pcm16(silence)
+                                    last_send_ts_holder["t"] = now
+                                except Exception:
+                                    self._ws_closed = True
+                            # auto reconnect if ws closed
+                            if self._ws_closed and not self._stop_event.is_set():
+                                self.event.emit("[WS] reconnecting…")
+                                self._ws_closed = False
+                                self._start_system_session(None)
+                                last_send_ts_holder["t"] = time_module.time()
+                            self.msleep(50)
+                        try:
+                            if self.stt_session:
+                                self.stt_session.close()
+                        finally:
+                            self.stt_session = None
             except Exception as primary_err:
                 self.message.emit(f"主回环打开失败，尝试默认扬声器回环：{primary_err}")
                 # Fallback: capture default speaker via soundcard library
@@ -296,52 +451,205 @@ class SystemStreamWorker(BaseStreamWorker):
                 block = int(fallback_rate * send_ms / 1000)
                 self.chunker = AudioChunker(fallback_rate, send_ms, chunk_frames=1, overlap_frames=0)
                 with DefaultLoopbackReader(fallback_rate, block) as reader:
-                    # Launch session
-                    self._start_system_session()
-                    capture_rate_holder["sr"] = fallback_rate
-                    while not self._stop_event.is_set():
-                        pcm = reader.read()
-                        for chunk in self.chunker.add_frame(pcm):
+                    # 可选：同时打开输出设备用于TTS播放
+                    if self.sys_out_device_index is not None:
+                        def out_callback(outdata, frames, time, status):  # noqa: ARG001
+                            if self._stop_event.is_set():
+                                raise sd.CallbackStop
+                            outdata.fill(0)
+                            if playback_queue:
+                                buf = playback_queue.popleft()
+                                needed = frames
+                                if len(buf) > needed:
+                                    data = buf[:needed]
+                                    remainder = buf[needed:]
+                                    playback_queue.appendleft(remainder)
+                                else:
+                                    data = buf
+                                out = (data.astype(np.float32) / 32767.0).reshape(-1, 1)
+                                outdata[: len(out), 0] = out[:, 0]
+                        # 候选播放采样率
+                        sr_candidates = []
+                        try:
+                            out_info = sd.query_devices(self.sys_out_device_index)
+                            default_sr = int(out_info.get("default_samplerate") or 44100)
+                            sr_candidates.append(default_sr)
+                        except Exception:
+                            pass
+                        for cand in [44100, 48000, 16000]:
+                            if cand not in sr_candidates:
+                                sr_candidates.append(cand)
+
+                        opened = False
+                        last_err = None
+                        for play_sr in sr_candidates:
+                            try:
+                                play_sr_holder["sr"] = play_sr
+                                with sd.OutputStream(
+                                    device=self.sys_out_device_index,
+                                    samplerate=play_sr,
+                                    channels=1,
+                                    dtype="float32",
+                                    blocksize=int(play_sr * FRAME_MS / 1000),
+                                    callback=out_callback,
+                                ):
+                                    try:
+                                        self.event.emit(f"TTS OutputStream opened: device={self.sys_out_device_index} sr={play_sr}")
+                                    except Exception:
+                                        pass
+                                    # Launch session
+                                    self._start_system_session(on_tts_playback)
+                                    capture_rate_holder["sr"] = fallback_rate
+                                    while not self._stop_event.is_set():
+                                        pcm = reader.read()
+                                        for chunk in self.chunker.add_frame(pcm):
+                                            try:
+                                                if self.stt_session:
+                                                    # Resample to API SR if needed
+                                                    api_sr = api_rate_holder["sr"]
+                                                    if api_sr != fallback_rate:
+                                                        chunk = _resample_pcm16(chunk, fallback_rate, api_sr)
+                                                    # Segment to <= 40ms
+                                                    max_samples = int(api_sr * 40 / 1000)
+                                                    start = 0
+                                                    while start < len(chunk):
+                                                        end = min(start + max_samples, len(chunk))
+                                                        self.stt_session.send_pcm16(chunk[start:end])
+                                                        now_dbg = time_module.time()
+                                                        if now_dbg - last_dbg_ts_holder["t"] > 1.0:
+                                                            try:
+                                                                self.event.emit(f"DEBUG send pcm len={end-start} sr={api_sr}")
+                                                            except Exception:
+                                                                pass
+                                                        start = end
+                                                        last_send_ts_holder["t"] = time_module.time()
+                                            except Exception as e:
+                                                self.status.emit(f"系统翻译错误: {e}")
+                                                self._ws_closed = True
+                                        self.msleep(5)
+                                        # heartbeat silence
+                                        now = time_module.time()
+                                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                            try:
+                                                api_sr = api_rate_holder["sr"]
+                                                silence = np.zeros(int(api_sr * send_ms / 1000), dtype=np.int16)
+                                                self.stt_session.send_pcm16(silence)
+                                                last_send_ts_holder["t"] = now
+                                            except Exception:
+                                                self._ws_closed = True
+                                    try:
+                                        if self.stt_session:
+                                            self.stt_session.close()
+                                    finally:
+                                        self.stt_session = None
+                                    opened = True
+                                    break
+                            except Exception as e:
+                                last_err = e
+                                try:
+                                    self.event.emit(f"TTS OutputStream open failed sr={play_sr}: {e}")
+                                except Exception:
+                                    pass
+                                continue
+                        if not opened:
+                            try:
+                                self.event.emit(f"TTS 播放禁用：无法打开输出设备 {self.sys_out_device_index}，最后错误: {last_err}")
+                            except Exception:
+                                pass
+                            # 不播放，仅字幕
+                            self._start_system_session(None)
+                            capture_rate_holder["sr"] = fallback_rate
+                            while not self._stop_event.is_set():
+                                pcm = reader.read()
+                                for chunk in self.chunker.add_frame(pcm):
+                                    try:
+                                        if self.stt_session:
+                                            # Resample to API SR if needed
+                                            api_sr = api_rate_holder["sr"]
+                                            if api_sr != fallback_rate:
+                                                chunk = _resample_pcm16(chunk, fallback_rate, api_sr)
+                                            # Segment to <= 40ms
+                                            max_samples = int(api_sr * 40 / 1000)
+                                            start = 0
+                                            while start < len(chunk):
+                                                end = min(start + max_samples, len(chunk))
+                                                self.stt_session.send_pcm16(chunk[start:end])
+                                                now_dbg = time_module.time()
+                                                if now_dbg - last_dbg_ts_holder["t"] > 1.0:
+                                                    try:
+                                                        self.event.emit(f"DEBUG send pcm len={end-start} sr={api_sr}")
+                                                    except Exception:
+                                                        pass
+                                                start = end
+                                                last_send_ts_holder["t"] = time_module.time()
+                                    except Exception as e:
+                                        self.status.emit(f"系统翻译错误: {e}")
+                                        self._ws_closed = True
+                                self.msleep(5)
+                                # heartbeat silence
+                                now = time_module.time()
+                                hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                                if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                    try:
+                                        api_sr = api_rate_holder["sr"]
+                                        silence = np.zeros(int(api_sr * send_ms / 1000), dtype=np.int16)
+                                        self.stt_session.send_pcm16(silence)
+                                        last_send_ts_holder["t"] = now
+                                    except Exception:
+                                        self._ws_closed = True
                             try:
                                 if self.stt_session:
-                                    # Resample to API SR if needed
+                                    self.stt_session.close()
+                            finally:
+                                self.stt_session = None
+                    else:
+                        # 不播放，仅字幕
+                        self._start_system_session(None)
+                        capture_rate_holder["sr"] = fallback_rate
+                        while not self._stop_event.is_set():
+                            pcm = reader.read()
+                            for chunk in self.chunker.add_frame(pcm):
+                                try:
+                                    if self.stt_session:
+                                        # Resample to API SR if needed
+                                        api_sr = api_rate_holder["sr"]
+                                        if api_sr != fallback_rate:
+                                            chunk = _resample_pcm16(chunk, fallback_rate, api_sr)
+                                        # Segment to <= 40ms
+                                        max_samples = int(api_sr * 40 / 1000)
+                                        start = 0
+                                        while start < len(chunk):
+                                            end = min(start + max_samples, len(chunk))
+                                            self.stt_session.send_pcm16(chunk[start:end])
+                                            now_dbg = time_module.time()
+                                            if now_dbg - last_dbg_ts_holder["t"] > 1.0:
+                                                try:
+                                                    self.event.emit(f"DEBUG send pcm len={end-start} sr={api_sr}")
+                                                except Exception:
+                                                    pass
+                                            start = end
+                                            last_send_ts_holder["t"] = time_module.time()
+                                except Exception as e:
+                                    self.status.emit(f"系统翻译错误: {e}")
+                                    self._ws_closed = True
+                            self.msleep(5)
+                            # heartbeat silence
+                            now = time_module.time()
+                            hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
+                            if now - last_send_ts_holder["t"] > hb and self.stt_session:
+                                try:
                                     api_sr = api_rate_holder["sr"]
-                                    if api_sr != fallback_rate:
-                                        chunk = _resample_pcm16(chunk, fallback_rate, api_sr)
-                                    # Segment to <= 40ms
-                                    max_samples = int(api_sr * 40 / 1000)
-                                    start = 0
-                                    while start < len(chunk):
-                                        end = min(start + max_samples, len(chunk))
-                                        self.stt_session.send_pcm16(chunk[start:end])
-                                        now_dbg = time_module.time()
-                                        if now_dbg - last_dbg_ts_holder["t"] > 1.0:
-                                            try:
-                                                self.event.emit(f"DEBUG send pcm len={end-start} sr={api_sr}")
-                                            except Exception:
-                                                pass
-                                        start = end
-                                        last_send_ts_holder["t"] = time_module.time()
-                            except Exception as e:
-                                self.status.emit(f"系统翻译错误: {e}")
-                                self._ws_closed = True
-                        self.msleep(5)
-                        # heartbeat silence
-                        now = time_module.time()
-                        hb = float(get_config().stt_api.heartbeat_interval_sec or 5.0)
-                        if now - last_send_ts_holder["t"] > hb and self.stt_session:
-                            try:
-                                api_sr = api_rate_holder["sr"]
-                                silence = np.zeros(int(api_sr * send_ms / 1000), dtype=np.int16)
-                                self.stt_session.send_pcm16(silence)
-                                last_send_ts_holder["t"] = now
-                            except Exception:
-                                self._ws_closed = True
-                    try:
-                        if self.stt_session:
-                            self.stt_session.close()
-                    finally:
-                        self.stt_session = None
+                                    silence = np.zeros(int(api_sr * send_ms / 1000), dtype=np.int16)
+                                    self.stt_session.send_pcm16(silence)
+                                    last_send_ts_holder["t"] = now
+                                except Exception:
+                                    self._ws_closed = True
+                        try:
+                            if self.stt_session:
+                                self.stt_session.close()
+                        finally:
+                            self.stt_session = None
                 # Prepare streaming session (noop here since already started)
                 cfg = get_config()
                 if cfg.stt_mode == "api" and cfg.stt_api.websocket_url:
@@ -398,7 +706,7 @@ class SystemStreamWorker(BaseStreamWorker):
                 self.stt_session.start(
                     cfg_sr,
                     on_tr,
-                    None,
+                    on_tts_playback if self.sys_out_device_index is not None else None,
                     {
                         "target_lang": self.target_lang,
                         "provider": cfg.stt_api.provider,

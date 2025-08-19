@@ -55,8 +55,8 @@ class WebSocketSTTClient:
                 self._on_event(f"WS open: provider={prov}")
             if prov == "baidu":
                 baidu = self.start_payload.get("baidu", {})
-                from_lang = (self.start_payload.get("from") or (extra or {}).get("from") or "zh")
-                to_lang = (self.start_payload.get("to") or (extra or {}).get("to") or "en")
+                from_lang = self.start_payload.get("from") or (extra or {}).get("from") or "zh"
+                to_lang = self.start_payload.get("to") or (extra or {}).get("to") or "en"
                 msg = {
                     "type": "START",
                     "from": from_lang,
@@ -87,8 +87,27 @@ class WebSocketSTTClient:
                 self._ready = True
 
         def on_message(ws, message):  # noqa: ANN001
+            # 有些服务端会通过 on_message 传递二进制帧，这里同时兼容处理
+            try:
+                if isinstance(message, (bytes, bytearray)):
+                    if len(message) > 1 and message[0] == 0x01 and self._on_tts:
+                        mp3_bytes = message[1:]
+                        pcm = self._decode_mp3_to_pcm16(mp3_bytes, target_sr=self.sample_rate)
+                        if pcm.size > 0:
+                            self._on_tts(pcm)
+                        if self._on_event:
+                            self._on_event(f"RECV BINARY TTS: {len(mp3_bytes)} bytes (via on_message)")
+                        return
+                    # 非 0x01 类型或无 TTS 回调，忽略
+                    return
+            except Exception:
+                pass
             if self._on_event:
-                self._on_event(f"RECV TEXT: {message[:200]}")
+                try:
+                    preview = message[:200] if isinstance(message, (str, bytes, bytearray)) else str(message)[:200]
+                except Exception:
+                    preview = str(type(message))
+                self._on_event(f"RECV TEXT: {preview}")
             try:
                 obj = json.loads(message)
             except Exception:
@@ -152,10 +171,14 @@ class WebSocketSTTClient:
                     return
                 mp3_bytes = message[1:]
                 pcm = self._decode_mp3_to_pcm16(mp3_bytes, target_sr=self.sample_rate)
+                if self._on_event:
+                    try:
+                        preview = f"RECV BINARY TTS: {len(mp3_bytes)} bytes"
+                    except Exception:
+                        preview = "RECV BINARY TTS"
+                    self._on_event(preview)
                 if pcm.size > 0:
                     self._on_tts(pcm)
-                if self._on_event:
-                    self._on_event(f"RECV BINARY TTS: {len(mp3_bytes)} bytes")
             except Exception:
                 pass
 
@@ -233,10 +256,9 @@ class WebSocketSTTClient:
                 frames = []
                 for packet in container.demux(stream):
                     for frame in packet.decode():
-                        # Convert to planar numpy array float32
                         arr = frame.to_ndarray(format="s16")  # shape: channels x samples
                         if arr.ndim == 2:
-                            # average channels to mono
+                            # 平均为单声道
                             pcm = arr.mean(axis=0).astype(np.int16)
                         else:
                             pcm = arr.astype(np.int16)
@@ -244,7 +266,7 @@ class WebSocketSTTClient:
                 if not frames:
                     return np.zeros((0,), dtype=np.int16)
                 data = np.concatenate(frames)
-                # Resample if needed: frame.sample_rate may be None; we assume 24000/44100 typical
+                # 重采样到目标采样率（若需要）
                 src_sr = stream.rate or target_sr
                 if src_sr != target_sr and data.size > 0:
                     data_f = data.astype(np.float32)
